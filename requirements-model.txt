@@ -1,0 +1,9 @@
+fastapi==0.115.12
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+python-multipart==0.0.12
+requests==2.32.3
+soundfile==0.12.1
+whisperx==3.8.2
+demucs==4.0.1
+torchcodec==0.7.0
