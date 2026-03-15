@@ -72,12 +72,14 @@ class DemucsService(BaseRuntimeService):
             job_dir = self.make_job_dir(job_id)
             source_kind = self._source_kind(upload=upload, source_url=source_url, source_path=source_path)
             self.logger.info(
-                "Demucs job started | job_id=%s | source_kind=%s | response_mode=%s | model=%s | two_stems=%s",
+                "Demucs job started | job_id=%s | source_kind=%s | response_mode=%s | model=%s | two_stems=%s | mp3=%s | mp3_bitrate=%s",
                 job_id,
                 source_kind,
                 options.response_mode,
                 options.model or self.settings.demucs_default_model,
                 options.two_stems or self.settings.demucs_default_two_stems or "",
+                self._effective_mp3(options),
+                options.mp3_bitrate if options.mp3_bitrate is not None else self.settings.demucs_default_mp3_bitrate,
             )
             input_path = await resolve_input_source(
                 self.settings,
@@ -172,10 +174,11 @@ class DemucsService(BaseRuntimeService):
             command.extend(["--filename", options.filename_template])
         if options.repo:
             command.extend(["--repo", options.repo])
-        if options.mp3:
+        if self._effective_mp3(options):
             command.append("--mp3")
-        if options.mp3_bitrate is not None:
-            command.extend(["--mp3-bitrate", str(options.mp3_bitrate)])
+        mp3_bitrate = options.mp3_bitrate if options.mp3_bitrate is not None else self.settings.demucs_default_mp3_bitrate
+        if self._effective_mp3(options) and mp3_bitrate is not None:
+            command.extend(["--mp3-bitrate", str(mp3_bitrate)])
         if options.mp3_preset is not None:
             command.extend(["--mp3-preset", str(options.mp3_preset)])
         if options.flac:
@@ -235,3 +238,8 @@ class DemucsService(BaseRuntimeService):
         if source_path:
             return "source_path"
         return "unknown"
+
+    def _effective_mp3(self, options: DemucsOptions) -> bool:
+        if options.mp3 is None:
+            return self.settings.demucs_default_mp3
+        return options.mp3

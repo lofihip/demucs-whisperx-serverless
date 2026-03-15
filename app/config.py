@@ -25,6 +25,8 @@ class Settings(BaseSettings):
 
     demucs_default_model: str = Field(default="htdemucs", alias="DEMUCS_DEFAULT_MODEL")
     demucs_default_two_stems: str = Field(default="", alias="DEMUCS_DEFAULT_TWO_STEMS")
+    demucs_default_mp3: bool = Field(default=True, alias="DEMUCS_DEFAULT_MP3")
+    demucs_default_mp3_bitrate: int = Field(default=192, alias="DEMUCS_DEFAULT_MP3_BITRATE")
 
     whisperx_default_model: str = Field(default="large-v3", alias="WHISPERX_DEFAULT_MODEL")
     whisperx_default_language: str = Field(default="", alias="WHISPERX_DEFAULT_LANGUAGE")

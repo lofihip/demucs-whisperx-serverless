@@ -31,6 +31,11 @@ Copy `.env.example` to `.env` and set:
 - `HUGGINGFACE_TOKEN` for diarization
 - `API_KEY` if you want request authentication
 
+Demucs defaults to `mp3` output to keep result sizes smaller. You can tune this with:
+
+- `DEMUCS_DEFAULT_MP3=true`
+- `DEMUCS_DEFAULT_MP3_BITRATE=192`
+
 Safe default:
 
 - `GPU_SERIAL_EXECUTION=true`
@@ -100,7 +105,7 @@ Windows PowerShell:
 ```powershell
 $env:LIVE_SERVER_URL="http://142.171.48.138:31150"
 $env:LIVE_SERVER_API_KEY="your-key"
-$env:LIVE_TEST_SOURCE_URL="https://tmpfiles.org/dl/29042560/voice-sample.mp3"
+$env:LIVE_TEST_SOURCE_URL="https://tmpfiles.org/dl/29065627/voice-sample.mp3"
 python -m pytest -q -m live_server tests/test_live_server.py
 ```
 
@@ -109,7 +114,7 @@ Linux/macOS:
 ```bash
 LIVE_SERVER_URL="http://142.171.48.138:31150" \
 LIVE_SERVER_API_KEY="your-key" \
-LIVE_TEST_SOURCE_URL="https://tmpfiles.org/dl/29042560/voice-sample.mp3" \
+LIVE_TEST_SOURCE_URL="https://tmpfiles.org/dl/29065627/voice-sample.mp3" \
 python -m pytest -q -m live_server tests/test_live_server.py
 ```
 

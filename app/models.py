@@ -33,7 +33,7 @@ class DemucsOptions(BaseModel):
     jobs: int | None = None
     clip_mode: str | None = None
     filename_template: str | None = None
-    mp3: bool = False
+    mp3: bool | None = None
     mp3_bitrate: int | None = None
     mp3_preset: int | None = None
     flac: bool = False
