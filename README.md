@@ -105,7 +105,7 @@ Windows PowerShell:
 ```powershell
 $env:LIVE_SERVER_URL="http://142.171.48.138:31150"
 $env:LIVE_SERVER_API_KEY="your-key"
-$env:LIVE_TEST_SOURCE_URL="https://tmpfiles.org/dl/29065627/voice-sample.mp3"
+$env:LIVE_TEST_SOURCE_URL="https://tmpfiles.org/dl/29079124/voice-sample.mp3"
 python -m pytest -q -m live_server tests/test_live_server.py
 ```
 
@@ -114,7 +114,7 @@ Linux/macOS:
 ```bash
 LIVE_SERVER_URL="http://142.171.48.138:31150" \
 LIVE_SERVER_API_KEY="your-key" \
-LIVE_TEST_SOURCE_URL="https://tmpfiles.org/dl/29065627/voice-sample.mp3" \
+LIVE_TEST_SOURCE_URL="https://tmpfiles.org/dl/29079124/voice-sample.mp3" \
 python -m pytest -q -m live_server tests/test_live_server.py
 ```
 

@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import subprocess
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 from fastapi import UploadFile
 
 from app.config import Settings
-from app.errors import InvalidInputError
 from app.models import DemucsManifest, DemucsOptions, OutputArtifact
 from app.services.base import BaseRuntimeService
 from app.utils.files import collect_artifacts, resolve_input_source, zip_directory
@@ -20,6 +19,7 @@ class DemucsService(BaseRuntimeService):
     def __init__(self, settings: Settings, gpu_lock: asyncio.Lock | None = None) -> None:
         super().__init__(name="demucs", settings=settings, gpu_lock=gpu_lock)
         self.logger = logging.getLogger("app.services.demucs")
+        self._separators: dict[tuple[str, str | None], object] = {}
 
     async def preload(self) -> None:
         self.status.mark_starting()
@@ -31,28 +31,29 @@ class DemucsService(BaseRuntimeService):
                 self.settings.demucs_default_model,
                 self.settings.gpu_device,
             )
-            warmup_dir = self.make_job_dir("warmup")
-            input_path = warmup_dir / "warmup.wav"
-            self._generate_silence(input_path)
-
-            cmd = self._build_command(
-                input_path=input_path,
-                output_dir=warmup_dir / "output",
-                options=DemucsOptions(
-                    model=self.settings.demucs_default_model,
-                    two_stems=self.settings.demucs_default_two_stems or None,
-                ),
+            separator = self._get_separator(
+                model_name=self.settings.demucs_default_model,
+                repo=None,
             )
-            self._run_command(cmd)
+            import torch
+
+            silence = torch.zeros(2, 44100, dtype=torch.float32)
+            separator.separate_tensor(silence, sr=44100)
             self.logger.info(
-                "Demucs preload finished | warmup_dir=%s | elapsed=%.2fs",
-                warmup_dir,
+                "Demucs preload finished | model=%s | elapsed=%.2fs",
+                self.settings.demucs_default_model,
                 time.perf_counter() - started_at,
             )
 
         try:
-            await asyncio.wait_for(asyncio.to_thread(_preload), timeout=self.settings.preload_timeout_seconds)
-            self.status.mark_ready(model=self.settings.demucs_default_model, device=self.settings.gpu_device)
+            await asyncio.wait_for(
+                asyncio.to_thread(_preload),
+                timeout=self.settings.preload_timeout_seconds,
+            )
+            self.status.mark_ready(
+                model=self.settings.demucs_default_model,
+                device=self.settings.gpu_device,
+            )
         except Exception as exc:
             self.status.mark_error(str(exc))
             raise
@@ -70,17 +71,27 @@ class DemucsService(BaseRuntimeService):
         async def _work() -> tuple[Path | DemucsManifest, Path]:
             started_at = time.perf_counter()
             job_dir = self.make_job_dir(job_id)
-            source_kind = self._source_kind(upload=upload, source_url=source_url, source_path=source_path)
+            source_kind = self._source_kind(
+                upload=upload,
+                source_url=source_url,
+                source_path=source_path,
+            )
+            model_name = options.model or self.settings.demucs_default_model
+            repo_path = Path(options.repo) if options.repo else None
+
             self.logger.info(
                 "Demucs job started | job_id=%s | source_kind=%s | response_mode=%s | model=%s | two_stems=%s | mp3=%s | mp3_bitrate=%s",
                 job_id,
                 source_kind,
                 options.response_mode,
-                options.model or self.settings.demucs_default_model,
+                model_name,
                 options.two_stems or self.settings.demucs_default_two_stems or "",
                 self._effective_mp3(options),
-                options.mp3_bitrate if options.mp3_bitrate is not None else self.settings.demucs_default_mp3_bitrate,
+                options.mp3_bitrate
+                if options.mp3_bitrate is not None
+                else self.settings.demucs_default_mp3_bitrate,
             )
+
             input_path = await resolve_input_source(
                 self.settings,
                 upload=upload,
@@ -94,26 +105,51 @@ class DemucsService(BaseRuntimeService):
                 input_path,
                 input_path.stat().st_size if input_path.exists() else "unknown",
             )
-            output_dir = job_dir / "output"
-            output_dir.mkdir(parents=True, exist_ok=True)
 
-            cmd = self._build_command(input_path=input_path, output_dir=output_dir, options=options)
             separation_started = time.perf_counter()
-            await asyncio.to_thread(self._run_command, cmd)
+            separator = await asyncio.to_thread(
+                self._prepare_separator,
+                model_name,
+                repo_path,
+                options,
+            )
+            origin, separated = await asyncio.to_thread(
+                separator.separate_audio_file,
+                input_path,
+            )
             self.logger.info(
-                "Demucs separation finished | job_id=%s | elapsed=%.2fs",
+                "Demucs separation finished | job_id=%s | elapsed=%.2fs | stems=%s",
                 job_id,
                 time.perf_counter() - separation_started,
+                ",".join(sorted(separated.keys())),
             )
 
-            artifacts = collect_artifacts(output_dir)
+            finalized = self._finalize_sources(
+                origin=origin,
+                separated=separated,
+                two_stems=options.two_stems or self.settings.demucs_default_two_stems or None,
+            )
+            output_root = job_dir / "output" / model_name
+            output_root.mkdir(parents=True, exist_ok=True)
+
+            save_started = time.perf_counter()
+            await asyncio.to_thread(
+                self._save_outputs,
+                separator,
+                input_path,
+                output_root,
+                finalized,
+                options,
+            )
+            artifacts = collect_artifacts(output_root)
             total_size = sum(size for _, size in artifacts)
             self.logger.info(
-                "Demucs outputs prepared | job_id=%s | artifacts=%s | total_size_bytes=%s | output_dir=%s",
+                "Demucs outputs prepared | job_id=%s | artifacts=%s | total_size_bytes=%s | output_dir=%s | save_elapsed=%.2fs",
                 job_id,
                 len(artifacts),
                 total_size,
-                output_dir,
+                output_root,
+                time.perf_counter() - save_started,
             )
 
             if options.response_mode == "manifest":
@@ -122,9 +158,13 @@ class DemucsService(BaseRuntimeService):
                     job_id,
                     time.perf_counter() - started_at,
                 )
-                return self._build_manifest(job_id=job_id, output_dir=output_dir), job_dir
+                return self._build_manifest(job_id=job_id, output_dir=output_root), job_dir
 
-            archive_path = await asyncio.to_thread(zip_directory, output_dir, job_dir / "demucs-output.zip")
+            archive_path = await asyncio.to_thread(
+                zip_directory,
+                output_root,
+                job_dir / "demucs-output.zip",
+            )
             self.logger.info(
                 "Demucs job completed | job_id=%s | response_mode=archive | archive_path=%s | total_elapsed=%.2fs",
                 job_id,
@@ -144,93 +184,123 @@ class DemucsService(BaseRuntimeService):
             )
             for path, size in collect_artifacts(output_dir)
         ]
-        return DemucsManifest(job_id=job_id, output_dir=str(output_dir), artifacts=artifacts)
+        return DemucsManifest(
+            job_id=job_id,
+            output_dir=str(output_dir),
+            artifacts=artifacts,
+        )
 
-    def _build_command(self, *, input_path: Path, output_dir: Path, options: DemucsOptions) -> list[str]:
-        model = options.model or self.settings.demucs_default_model
-        command = [
-            "demucs",
-            "-d",
+    def _prepare_separator(self, model_name: str, repo_path: Path | None, options: DemucsOptions):
+        separator = self._get_separator(model_name=model_name, repo=repo_path)
+        separator.update_parameter(
+            shifts=options.shifts if options.shifts is not None else 1,
+            overlap=options.overlap if options.overlap is not None else 0.25,
+            segment=options.segment,
+            jobs=options.jobs if options.jobs is not None else 0,
+            progress=True,
+        )
+        return separator
+
+    def _get_separator(self, *, model_name: str, repo: Path | None):
+        from demucs.api import Separator
+
+        cache_key = (model_name, str(repo) if repo is not None else None)
+        if cache_key in self._separators:
+            self.logger.info("Demucs separator reused | model=%s | repo=%s", model_name, repo)
+            return self._separators[cache_key]
+
+        load_started = time.perf_counter()
+        self.logger.info(
+            "Demucs separator loading | model=%s | repo=%s | device=%s",
+            model_name,
+            repo,
             self.settings.gpu_device,
-            "-o",
-            str(output_dir),
-            "-n",
-            model,
-        ]
+        )
+        separator = Separator(
+            model=model_name,
+            repo=repo,
+            device=self.settings.gpu_device,
+            progress=True,
+        )
+        self._separators[cache_key] = separator
+        self.logger.info(
+            "Demucs separator loaded | model=%s | elapsed=%.2fs",
+            model_name,
+            time.perf_counter() - load_started,
+        )
+        return separator
 
-        if options.two_stems or self.settings.demucs_default_two_stems:
-            command.extend(["--two-stems", options.two_stems or self.settings.demucs_default_two_stems])
-        if options.segment is not None:
-            command.extend(["--segment", str(options.segment)])
-        if options.shifts is not None:
-            command.extend(["--shifts", str(options.shifts)])
-        if options.overlap is not None:
-            command.extend(["--overlap", str(options.overlap)])
-        if options.jobs is not None:
-            command.extend(["-j", str(options.jobs)])
-        if options.clip_mode:
-            command.extend(["--clip-mode", options.clip_mode])
-        if options.filename_template:
-            command.extend(["--filename", options.filename_template])
-        if options.repo:
-            command.extend(["--repo", options.repo])
-        if self._effective_mp3(options):
-            command.append("--mp3")
-        mp3_bitrate = options.mp3_bitrate if options.mp3_bitrate is not None else self.settings.demucs_default_mp3_bitrate
-        if self._effective_mp3(options) and mp3_bitrate is not None:
-            command.extend(["--mp3-bitrate", str(mp3_bitrate)])
-        if options.mp3_preset is not None:
-            command.extend(["--mp3-preset", str(options.mp3_preset)])
-        if options.flac:
-            command.append("--flac")
-        if options.int24:
-            command.append("--int24")
-        if options.float32:
-            command.append("--float32")
-        command.extend(options.extra_args)
-        command.append(str(input_path))
-        return command
+    def _finalize_sources(
+        self,
+        *,
+        origin,
+        separated: dict[str, Any],
+        two_stems: str | None,
+    ) -> dict[str, Any]:
+        import torch
 
-    def _run_command(self, command: list[str]) -> None:
-        self.logger.info("Running Demucs command: %s", " ".join(command))
-        completed = subprocess.run(command, capture_output=True, text=True, check=False)
-        if completed.returncode != 0:
-            self.logger.error(
-                "Demucs command failed | exit_code=%s | stdout=%s | stderr=%s",
-                completed.returncode,
-                completed.stdout.strip(),
-                completed.stderr.strip(),
+        if not two_stems:
+            return separated
+        if two_stems not in separated:
+            raise ValueError(
+                f'Stem "{two_stems}" is not available in selected model. '
+                f'Available stems: {", ".join(sorted(separated.keys()))}'
             )
-            raise RuntimeError(
-                "Demucs failed with exit code "
-                f"{completed.returncode}: {completed.stderr.strip() or completed.stdout.strip()}"
-            )
-        if completed.stdout.strip():
-            self.logger.info("Demucs command stdout | %s", completed.stdout.strip())
-        if completed.stderr.strip():
-            self.logger.info("Demucs command stderr | %s", completed.stderr.strip())
 
-    def _generate_silence(self, destination: Path) -> None:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "anullsrc=r=44100:cl=stereo",
-            "-t",
-            "1",
-            str(destination),
-        ]
-        completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if completed.returncode != 0:
-            raise InvalidInputError(
-                f"Unable to generate Demucs warmup audio: {completed.stderr.strip() or completed.stdout.strip()}"
+        accompaniment = torch.zeros_like(next(iter(separated.values())))
+        for stem_name, source in separated.items():
+            if stem_name != two_stems:
+                accompaniment += source
+        return {
+            two_stems: separated[two_stems],
+            f"no_{two_stems}": accompaniment,
+        }
+
+    def _save_outputs(
+        self,
+        separator,
+        input_path: Path,
+        output_root: Path,
+        separated: dict[str, Any],
+        options: DemucsOptions,
+    ) -> None:
+        from demucs.api import save_audio
+
+        use_mp3 = self._effective_mp3(options)
+        ext = "flac" if options.flac else "mp3" if use_mp3 else "wav"
+        samplerate = separator.samplerate
+        filename_template = options.filename_template or "{track}/{stem}.{ext}"
+        track_name = input_path.stem
+        track_ext = input_path.suffix.lstrip(".")
+        save_kwargs = {
+            "samplerate": samplerate,
+            "bitrate": options.mp3_bitrate
+            if options.mp3_bitrate is not None
+            else self.settings.demucs_default_mp3_bitrate,
+            "preset": options.mp3_preset if options.mp3_preset is not None else 2,
+            "clip": options.clip_mode or "rescale",
+            "as_float": options.float32,
+            "bits_per_sample": 24 if options.int24 else 16,
+        }
+
+        for stem_name, source in separated.items():
+            relative_name = filename_template.format(
+                track=track_name,
+                trackext=track_ext,
+                stem=stem_name,
+                ext=ext,
             )
+            destination = output_root / relative_name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            save_audio(source, str(destination), **save_kwargs)
 
     @staticmethod
-    def _source_kind(*, upload: UploadFile | None, source_url: str | None, source_path: str | None) -> str:
+    def _source_kind(
+        *,
+        upload: UploadFile | None,
+        source_url: str | None,
+        source_path: str | None,
+    ) -> str:
         if upload is not None:
             return "upload"
         if source_url:
@@ -240,6 +310,8 @@ class DemucsService(BaseRuntimeService):
         return "unknown"
 
     def _effective_mp3(self, options: DemucsOptions) -> bool:
+        if options.flac:
+            return False
         if options.mp3 is None:
             return self.settings.demucs_default_mp3
         return options.mp3

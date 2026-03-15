@@ -19,7 +19,7 @@ LIVE_AUDIO_PATH = Path(os.getenv("LIVE_TEST_AUDIO_PATH", "tests/voice-sample.mp3
 LIVE_OUTPUT_DIR = Path(os.getenv("LIVE_TEST_OUTPUT_DIR", "tests/output"))
 LIVE_SOURCE_URL = os.getenv(
     "LIVE_TEST_SOURCE_URL",
-    "https://tmpfiles.org/dl/29065627/voice-sample.mp3",
+    "https://tmpfiles.org/dl/29079124/voice-sample.mp3",
 )
 
 pytestmark = pytest.mark.live_server
