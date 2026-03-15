@@ -1,46 +1,98 @@
 # Demucs + WhisperX CUDA HTTP Server
 
-CUDA-only Docker service with two independent HTTP runtimes:
+CUDA-only HTTP service with two independent runtimes:
 
 - `Demucs` for source separation
 - `WhisperX` for transcription, alignment, and diarization
 
-Both runtimes preload on container startup, download required weights, and expose readiness plus busy-state endpoints.
+Both services preload on container startup, expose readiness and busy-state endpoints, and can be called independently.
 
 ## Upstream sources
 
 - Demucs: https://github.com/facebookresearch/demucs
 - WhisperX: https://github.com/m-bain/whisperX
 
-This image installs both projects directly from their GitHub repositories so the container uses the latest upstream code available at build time.
+This image installs both projects directly from their GitHub repositories, so the container uses the latest upstream code available at build time.
 
-## API
+## API endpoints
 
-- `POST /demucs/process`
-- `POST /whisperx/process`
 - `GET /health`
 - `GET /ready`
 - `GET /status`
 - `GET /status/demucs`
 - `GET /status/whisperx`
+- `POST /demucs/process`
+- `POST /whisperx/process`
 
-## Environment
+## Readiness and status
 
-Copy `.env.example` to `.env` and set:
+- `GET /health` returns process liveness
+- `GET /ready` returns `200` only when both runtimes finished preload
+- `GET /status` returns overall status plus `demucs` and `whisperx`
+- `GET /status/demucs` and `GET /status/whisperx` return per-service state
 
-- `HUGGINGFACE_TOKEN` for diarization
-- `API_KEY` if you want request authentication
+Possible runtime states:
 
-Demucs defaults to `mp3` output to keep result sizes smaller. You can tune this with:
+- `starting`
+- `ready`
+- `busy`
+- `error`
 
+## Authentication
+
+`API_KEY` is optional.
+
+- if `API_KEY` is empty, requests are accepted without auth
+- if `API_KEY` is set, clients must send `X-API-Key`
+
+## Input modes
+
+Each processing endpoint accepts exactly one input source:
+
+- multipart `file`
+- `source_url`
+- `source_path`
+
+## Environment variables
+
+Copy `.env.example` to `.env`.
+
+Important variables:
+
+- `APP_HOST`
+- `APP_PORT`
+- `APP_LOG_LEVEL`
+- `API_KEY`
+- `WORK_ROOT`
+- `MODEL_CACHE_DIR`
+- `TEMP_ROOT`
+- `GPU_DEVICE`
+- `GPU_SERIAL_EXECUTION`
+- `PRELOAD_ON_STARTUP`
+- `PRELOAD_TIMEOUT_SECONDS`
+
+Demucs defaults:
+
+- `DEMUCS_DEFAULT_MODEL=htdemucs`
+- `DEMUCS_DEFAULT_TWO_STEMS=`
 - `DEMUCS_DEFAULT_MP3=true`
 - `DEMUCS_DEFAULT_MP3_BITRATE=192`
 
-Safe default:
+WhisperX defaults:
 
-- `GPU_SERIAL_EXECUTION=true`
+- `WHISPERX_DEFAULT_MODEL=large-v3`
+- `WHISPERX_DEFAULT_LANGUAGE=`
+- `WHISPERX_DEFAULT_BATCH_SIZE=8`
+- `WHISPERX_COMPUTE_TYPE=float16`
+- `WHISPERX_PRELOAD_ALIGN_LANGUAGE=en`
+- `WHISPERX_ENABLE_DIARIZATION=true`
+- `HUGGINGFACE_TOKEN=...`
 
-That keeps separate busy-state tracking while preventing parallel GPU inference from exhausting VRAM.
+Notes:
+
+- `GPU_SERIAL_EXECUTION=true` is the safe default for a single GPU
+- `HUGGINGFACE_TOKEN` is required for diarization
+- `DEMUCS_DEFAULT_TWO_STEMS=vocals` gives `vocals` + `no_vocals`
 
 ## Build
 
@@ -62,18 +114,84 @@ docker run --rm -p 8000:8000 --gpus all \
 curl http://localhost:8000/ready
 ```
 
-The endpoint returns HTTP `503` until both runtimes complete warmup and weight downloads.
+`/ready` returns `503` until both runtimes finish preload.
 
-## Demucs example
+## Demucs request format
 
-  ```bash
-  curl -X POST "http://localhost:8000/demucs/process" \
-    -H "X-API-Key: your-key" \
-    -F "file=@input.mp3" \
-  -F 'options_json={"model":"htdemucs","two_stems":"vocals","mp3":true,"response_mode":"archive"}'
-  ```
+`POST /demucs/process`
 
-## WhisperX example
+Form fields:
+
+- `file` or `source_url` or `source_path`
+- `options_json`
+
+Supported `DemucsOptions` fields:
+
+- `model`
+- `two_stems`
+- `segment`
+- `shifts`
+- `overlap`
+- `jobs`
+- `clip_mode`
+- `filename_template`
+- `mp3`
+- `mp3_bitrate`
+- `mp3_preset`
+- `flac`
+- `int24`
+- `float32`
+- `repo`
+- `response_mode`
+
+`response_mode` values:
+
+- `archive`
+- `manifest`
+
+Demucs examples:
+
+```bash
+curl -X POST "http://localhost:8000/demucs/process" \
+  -H "X-API-Key: your-key" \
+  -F "file=@input.mp3" \
+  -F 'options_json={"model":"htdemucs","two_stems":"vocals","response_mode":"archive"}'
+```
+
+```bash
+curl -X POST "http://localhost:8000/demucs/process" \
+  -H "X-API-Key: your-key" \
+  -F 'source_url=https://example.com/input.mp3' \
+  -F 'options_json={"two_stems":"vocals","response_mode":"manifest"}'
+```
+
+## WhisperX request format
+
+`POST /whisperx/process`
+
+Form fields:
+
+- `file` or `source_url` or `source_path`
+- `options_json`
+
+Supported `WhisperXOptions` fields:
+
+- `model`
+- `language`
+- `batch_size`
+- `compute_type`
+- `align`
+- `diarize`
+- `min_speakers`
+- `max_speakers`
+- `response_mode`
+
+`response_mode` values:
+
+- `json`
+- `archive`
+
+WhisperX examples:
 
 ```bash
 curl -X POST "http://localhost:8000/whisperx/process" \
@@ -82,19 +200,45 @@ curl -X POST "http://localhost:8000/whisperx/process" \
   -F 'options_json={"model":"large-v3","align":true,"diarize":true,"min_speakers":2,"max_speakers":4,"response_mode":"json"}'
 ```
 
-## Input modes
+```bash
+curl -X POST "http://localhost:8000/whisperx/process" \
+  -H "X-API-Key: your-key" \
+  -F 'source_path=/workspace/input/meeting.wav' \
+  -F 'options_json={"align":true,"diarize":true,"response_mode":"archive"}'
+```
 
-Each processing endpoint accepts exactly one of:
+## Output behavior
 
-- multipart `file`
-- `source_url`
-- `source_path`
+Demucs:
 
-## Notes
+- `archive` returns a zip archive with separated stems
+- `manifest` returns JSON with artifact list and output directory
 
-- Demucs runs through the CLI to stay close to upstream behavior and expose a broad flag surface.
-- WhisperX runs through the Python API so JSON output, alignment, and diarization stay structured.
-- The official Demucs repository is archived, but this project still installs from that upstream repository because it was explicitly requested.
+WhisperX:
+
+- `json` returns structured transcript data
+- `archive` returns a zip archive with generated files
+
+WhisperX archive outputs typically include:
+
+- `transcript.json`
+- `transcript.txt`
+- `transcript.srt`
+- `transcript.vtt`
+- `transcript.tsv`
+- `plain.txt`
+
+## Logging
+
+The service logs:
+
+- request acceptance
+- source type
+- model selection
+- preload start/finish
+- per-stage timings for Demucs and WhisperX
+- output artifact counts and sizes
+- response mode and cleanup scheduling
 
 ## Live server test
 
@@ -118,7 +262,7 @@ LIVE_TEST_SOURCE_URL="https://tmpfiles.org/dl/29079124/voice-sample.mp3" \
 python -m pytest -q -m live_server tests/test_live_server.py
 ```
 
-The live test generates tiny WAV files on the fly and checks:
+The live suite checks:
 
 - `/health`
 - `/status`
@@ -127,6 +271,18 @@ The live test generates tiny WAV files on the fly and checks:
 - real `POST /whisperx/process` in `json` mode
 - real `POST /whisperx/process` in `archive` mode
 
-The live suite now sends processing requests through `source_url` to avoid large multipart uploads.
-You can override the default file URL with `LIVE_TEST_SOURCE_URL`.
-Real server responses are written into `tests/output/` by default and can be redirected with `LIVE_TEST_OUTPUT_DIR`.
+It writes real server results into `tests/output/` by default.
+
+Optional live-test env vars:
+
+- `LIVE_SERVER_URL`
+- `LIVE_SERVER_API_KEY`
+- `LIVE_TEST_SOURCE_URL`
+- `LIVE_TEST_OUTPUT_DIR`
+- `LIVE_TEST_TIMEOUT_SECONDS`
+
+## Notes
+
+- Demucs now uses persistent in-process `demucs.api.Separator` objects and reuses loaded models between requests
+- WhisperX uses persistent in-process ASR, align, and diarization objects
+- the official Demucs repository is archived, but this project still installs from that upstream repository because it was explicitly requested
